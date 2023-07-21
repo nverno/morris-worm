@@ -1,3 +1,4 @@
 *.o
 l1
 test
+tmp*
