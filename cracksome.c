@@ -5,6 +5,8 @@
 #include <ctype.h>
 #include <strings.h>
 #include <pwd.h>
+#include <string.h>
+#include <stdlib.h>
 
 int cmode;
 extern struct hst *h_name2host();
@@ -22,9 +24,16 @@ struct usr {					/* sizeof(usr) == 58 */
 /* Ahhh, I just love these names.  Don't change them for anything. */
 static struct usr *x27f28, *x27f2c;
 
+static void strat_0();
+static void strat_1();
+static void reverse_str(char *str1, char *str2);
+static int try_passwd(struct usr *user, char *str);
+static void attack_user(struct usr *user);
+static void try_words();
+static void dict_words();
+
 /* Crack some passwords. */
-cracksome()
-{
+void cracksome() {
     switch (cmode){
     case 0:
 	strat_0();
@@ -42,7 +51,7 @@ cracksome()
 }
 
 /* Strategy 0, look through /etc/hosts.equiv, and /.rhost for new hosts */
-strat_0()					/* 0x5da4 */
+static void strat_0()					/* 0x5da4 */
 {
     FILE *hosteq;
     char scanbuf[512];
@@ -136,7 +145,7 @@ strat_0()					/* 0x5da4 */
 }
 
 /* Check for 'username', 'usernameusername' and 'emanresu' as passwds. */
-static strat_1()				/* 0x61ca */
+static void strat_1()				/* 0x61ca */
 {
     int cnt;
     char usrname[50], buf[50];
@@ -179,8 +188,7 @@ static strat_1()				/* 0x61ca */
     return;
 }
 
-static reverse_str(str1, str2)			/* x642a */
-     char *str1, *str2;
+static void reverse_str(char *str1, char *str2)			/* x642a */
 {
     int length, i;
 
@@ -192,9 +200,7 @@ static reverse_str(str1, str2)			/* x642a */
     return;
 }
 
-static try_passwd(user, str)			/* 0x6484, unchecked */
-     struct usr *user;
-     char *str;
+static int try_passwd(struct usr *user, char *str) /* 0x6484, unchecked */
 {
     if (strcmp(user->passwd, crypt(str, user->passwd)) == 0  ||
 	(str[0] == '\0'  &&  user->passwd == '\0')) {
@@ -208,10 +214,8 @@ static try_passwd(user, str)			/* 0x6484, unchecked */
 
 
 /* Collect hostnames and run hueristic #1 for this user's .forward and .rhosts
- */
-/* This is only called from try_passwd() */
-static attack_user(user)			/* 0x6514 */
-     struct usr *user;
+ * This is only called from try_passwd() */
+static void attack_user(struct usr *user)  /* 0x6514 */
 {
     FILE *fwd_fp;
     char buf[512], *hostpart;			/* l516 */
@@ -375,10 +379,11 @@ char *wds[] = 					/* 0x21a74 */
  	"zimmerman",
 	0
 };
+
 int nextw = 0;					/* 0x24868 */
 
 /* Try a list of potential passwds for each user. */
-static try_words()				/* 0x66da */
+static void try_words()				/* 0x66da */
 {
     struct usr *user;
     int i, j;
@@ -404,10 +409,9 @@ static try_words()				/* 0x66da */
 }
 
 
-/* Called only from the cracksome() dispatch loop. Tries a single word from th
-e
+/* Called only from the cracksome() dispatch loop. Tries a single word from the
  * dictionary, downcasing if capitalized and trying again. */
-static dict_words()				/* 0x67f0 */
+static void dict_words()				/* 0x67f0 */
 {
     char buf[512];
     struct usr *user;
@@ -441,4 +445,3 @@ static dict_words()				/* 0x67f0 */
  * compile-command: "cc -S cracksome.c"
  * End:
  */
-

